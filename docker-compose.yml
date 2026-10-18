@@ -1,0 +1,30 @@
+# HeaderProxy — deploy next to playwright-mcp.
+#
+# Joins the existing `exllamav2_default` network so the main playwright-mcp
+# container can reach the proxy at http://header-proxy:8088, while the control
+# plane (REST + MCP) is reachable at http://header-proxy:8080 (and from the
+# host on 127.0.0.1 only, by default).
+services:
+  header-proxy:
+    build: .
+    image: header-proxy:latest
+    container_name: header-proxy
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8080:8080" # control plane: REST /api + MCP /mcp
+      - "127.0.0.1:8088:8088" # data plane: HTTP/HTTPS proxy
+    environment:
+      - TZ=America/New_York
+      - HP_LOG_LEVEL=${HP_LOG_LEVEL:-INFO}
+      - HP_API_KEY=${HP_API_KEY:-}
+    volumes:
+      - header-proxy-data:/data
+    networks:
+      - exllamav2_default
+
+networks:
+  exllamav2_default:
+    external: true
+
+volumes:
+  header-proxy-data:
