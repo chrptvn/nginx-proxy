@@ -29,6 +29,13 @@ def _env_float(env: dict[str, str], key: str, default: float) -> float:
     return float(raw) if raw else default
 
 
+# Local endpoints of the wireproxy subprocess (see headerproxy.vpn): the SOCKS5
+# egress port and the HTTP info/health port.  One VPN manager per process, so
+# fixed ports are unambiguous.
+VPN_SOCKS_PORT = 40001
+VPN_INFO_PORT = 40002
+
+
 @dataclass(frozen=True)
 class Config:
     """Runtime configuration for both the proxy and the control plane."""
@@ -58,6 +65,10 @@ class Config:
     ws_relay: bool = True
     # Upstream TLS verification: "system" (default), "none", or a CA bundle path.
     upstream_verify: str = "system"
+    # VPN egress: spawn wireproxy (userspace WireGuard -> SOCKS5) and route all
+    # upstream traffic through the tunnel.  See headerproxy.vpn.
+    vpn_enabled: bool = True
+    vpn_binary: str = "wireproxy"
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> "Config":
@@ -78,4 +89,6 @@ class Config:
             cert_cache_size=_env_int(env, "HP_CERT_CACHE_SIZE", 2048),
             ws_relay=_env_bool(env, "HP_WS_RELAY", True),
             upstream_verify=env.get("HP_UPSTREAM_VERIFY", "system"),
+            vpn_enabled=_env_bool(env, "HP_VPN", True),
+            vpn_binary=env.get("HP_VPN_BINARY", "wireproxy"),
         )

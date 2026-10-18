@@ -14,8 +14,10 @@ from headerproxy.api import create_app
 from headerproxy.config import Config
 from headerproxy.engine import Engine
 from headerproxy.mcp_server import create_mcp
+from headerproxy.relay import UpstreamClient
 from headerproxy.runtime import Runtime
 from headerproxy.store import Store
+from headerproxy.vpn import VPNManager
 
 EXPECTED_TOOLS = {
     "proxy_status",
@@ -32,17 +34,31 @@ EXPECTED_TOOLS = {
     "add_filter",
     "list_filters",
     "remove_filter",
+    "activate_vpn",
+    "deactivate_vpn",
+    "vpn_status",
+    "list_vpn_profiles",
 }
 
 
 @pytest.fixture
-async def server(tmp_path):
-    cfg = Config(data_dir=tmp_path / "data", log_level="ERROR")
+async def server(tmp_path, fake_wireproxy):
+    cfg = Config(
+        data_dir=tmp_path / "data",
+        log_level="ERROR",
+        vpn_binary=str(fake_wireproxy.binary),
+    )
     store = Store(cfg.data_dir / "headerproxy.db")
     store.ensure_default_session(True)
     engine = Engine(store)
     engine.reload()
-    rt = Runtime(cfg=cfg, store=store, engine=engine, ca=None, upstream=None, proxy=None)
+    upstream = UpstreamClient(timeout=30)
+    (cfg.data_dir / "vpn").mkdir(parents=True, exist_ok=True)
+    (cfg.data_dir / "vpn" / "mcp.conf").write_text("[Interface]\n")
+    vpn = VPNManager(cfg, upstream)
+    rt = Runtime(
+        cfg=cfg, store=store, engine=engine, ca=None, upstream=upstream, proxy=None, vpn=vpn
+    )
     mcp = create_mcp(rt)
     app = create_app(rt, mcp_app=mcp.streamable_http_app())
 
@@ -59,6 +75,11 @@ async def server(tmp_path):
     yield f"http://127.0.0.1:{port}", rt
     uv.should_exit = True
     thread.join(10)
+    # the tunnel (if a test left it up) belongs to the server loop: kill sync
+    proc = vpn._proc
+    if proc is not None and proc.returncode is None:
+        proc.kill()
+    await upstream.close()
     store.close()
 
 
@@ -141,6 +162,36 @@ async def test_error_reporting(server):
     async for s in with_session(base_url):
         result = await call(s, "switch_session", {"name": "missing"})
         assert result["ok"] is False
+
+
+async def test_vpn_tools_flow(server, fake_wireproxy):
+    base_url, rt = server
+    async for s in with_session(base_url):
+        profiles = await call(s, "list_vpn_profiles")
+        assert profiles["ok"] is True
+        assert profiles["profiles"] == ["mcp.conf"]
+        assert profiles["active"] is None
+
+        activated = await call(s, "activate_vpn", {"profile": "mcp.conf"})
+        assert activated["ok"] is True
+        assert activated["active"] is True
+        assert activated["profile"] == "mcp.conf"
+        assert rt.upstream.proxy_url.startswith("socks5h://127.0.0.1:")
+
+        status = await call(s, "vpn_status")
+        assert status["active"] is True
+        assert status["handshake_ready"] is True
+
+        dup = await call(s, "activate_vpn", {"profile": "mcp.conf"})
+        assert dup["ok"] is False and "already active" in dup["error"]
+
+        ghost = await call(s, "activate_vpn", {"profile": "ghost.conf"})
+        assert ghost["ok"] is False and "unknown" in ghost["error"]
+
+        deactivated = await call(s, "deactivate_vpn")
+        assert deactivated["ok"] is True
+        assert deactivated["active"] is False
+        assert rt.upstream.proxy_url is None
 
 
 async def test_rest_routes_served_alongside_mcp(server):

@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 from . import __version__
 from .runtime import Runtime
 from .store import Filter, Override, Session, StoreError
+from .vpn import VPNManager
 
 
 # -- request/response models ---------------------------------------------------
@@ -47,6 +48,12 @@ class FilterIn(BaseModel):
     host: str = Field(min_length=1, max_length=512, description='glob, e.g. "*.example.com"')
     path: str = Field("*", min_length=1, max_length=512)
     comment: str | None = Field(default=None, max_length=512)
+
+
+class VPNActivateIn(BaseModel):
+    profile: str = Field(
+        min_length=1, max_length=256, description="wg-quick profile filename in /data/vpn"
+    )
 
 
 class SessionOut(BaseModel):
@@ -144,6 +151,26 @@ def _run(rt: Runtime, fn: Callable[[], Any], *, reload_engine: bool = False) -> 
     return result
 
 
+def _vpn(rt: Runtime) -> VPNManager:
+    if rt.vpn is None:
+        raise HTTPException(
+            status_code=404,
+            detail="VPN feature disabled (HP_VPN=0 or wireproxy binary not installed)",
+        )
+    return rt.vpn
+
+
+def _vpn_error(exc: RuntimeError) -> HTTPException:
+    message = str(exc)
+    if "already active" in message:
+        status = 409
+    elif message.startswith("unknown VPN profile"):
+        status = 404
+    else:
+        status = 400
+    return HTTPException(status_code=status, detail=message)
+
+
 # -- app factory ----------------------------------------------------------------
 
 
@@ -171,6 +198,8 @@ def create_app(rt: Runtime, mcp_app: Any | None = None) -> FastAPI:
             finally:
                 if rt.proxy is not None:
                     await rt.proxy.stop()
+                if rt.vpn is not None:
+                    await rt.vpn.shutdown()
                 if rt.upstream is not None:
                     await rt.upstream.close()
 
@@ -343,6 +372,37 @@ def create_app(rt: Runtime, mcp_app: Any | None = None) -> FastAPI:
             lambda: rt.store.delete_filter(name, filter_id),
             reload_engine=True,
         )
+
+    # -- vpn egress -----------------------------------------------------------------
+
+    @app.post("/api/vpn/activate")
+    async def vpn_activate(body: VPNActivateIn) -> dict:
+        """Route all upstream egress through a WireGuard profile (wireproxy)."""
+        vpn = _vpn(rt)
+        try:
+            await vpn.activate(body.profile)
+        except RuntimeError as exc:
+            raise _vpn_error(exc) from exc
+        return await vpn.status()
+
+    @app.post("/api/vpn/deactivate")
+    async def vpn_deactivate() -> dict:
+        """Stop the tunnel; egress goes direct again."""
+        vpn = _vpn(rt)
+        try:
+            await vpn.deactivate()
+        except RuntimeError as exc:
+            raise _vpn_error(exc) from exc
+        return await vpn.status()
+
+    @app.get("/api/vpn/status")
+    async def vpn_status() -> dict:
+        return await _vpn(rt).status()
+
+    @app.get("/api/vpn/profiles")
+    async def vpn_profiles() -> dict:
+        vpn = _vpn(rt)
+        return {"profiles": vpn.profiles(), "active": vpn.active_profile}
 
     # The MCP app (mounted last, so the REST routes above match first) serves
     # its streamable-HTTP transport at /mcp.

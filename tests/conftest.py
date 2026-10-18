@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import ssl
+import sys
 import threading
 import datetime as _dt
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from cryptography import x509
@@ -171,6 +174,26 @@ def ipaddress_or(addr: str):
     import ipaddress
 
     return ipaddress.ip_address(addr)
+
+
+@pytest.fixture
+def fake_wireproxy(tmp_path):
+    """A fake wireproxy executable + the SOCKS target log it writes to.
+
+    The "binary" is a tiny sh wrapper exec'ing tests/fake_wireproxy.py, so
+    ``create_subprocess_exec(cfg.vpn_binary, ...)`` works unchanged.
+    """
+    log_file = tmp_path / "socks.log"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    wrapper = bin_dir / "fake-wireproxy"
+    wrapper.write_text(
+        "#!/bin/sh\n"
+        f'FAKE_SOCKS_LOG="{log_file}" exec "{sys.executable}" '
+        f'"{Path(__file__).parent / "fake_wireproxy.py"}" "$@"\n'
+    )
+    wrapper.chmod(0o755)
+    return SimpleNamespace(binary=wrapper, log=log_file)
 
 
 @pytest.fixture

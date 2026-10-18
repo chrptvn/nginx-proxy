@@ -19,6 +19,9 @@ services:
       - HP_API_KEY=${HP_API_KEY:-}
     volumes:
       - header-proxy-data:/data
+      # Drop WireGuard profiles (standard wg-quick .conf files) into ./data/vpn/
+      # on the host, then activate them via /api/vpn/activate or the MCP tools.
+      - ./data/vpn:/data/vpn:ro
     networks:
       - exllamav2_default
 

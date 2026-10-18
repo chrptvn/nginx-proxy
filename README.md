@@ -45,7 +45,7 @@ their traffic look like it comes from a regular browser — see [Stealth](#steal
 - **WebSocket relay** — `ws://` and `wss://` upgrades are tunneled raw (rules still apply to
   the upgrade request).
 - **Streaming** — responses are relayed chunk-by-chunk (SSE and large downloads work).
-- **MCP server** — streamable HTTP at `/mcp`, stateless JSON mode; all 14 control operations
+- **MCP server** — streamable HTTP at `/mcp`, stateless JSON mode; all 18 control operations
   available as tools.
 - **Persistence** — SQLite in WAL mode; survives restarts.
 - **Optional API key** — protect `/api` + `/mcp` with a bearer token.
@@ -153,11 +153,13 @@ executable documentation.
 ## MCP
 
 Streamable HTTP transport at **`http://header-proxy:8080/mcp`** (stateless JSON mode).
-Tools operate on the **active session**:
+Tools operate on the **active session** (VPN tools are session-independent — see
+[VPN egress](#vpn-egress-optional)):
 
 `proxy_status` · `create_session` · `list_sessions` · `save_session` · `switch_session` ·
 `delete_session` · `inject_header` · `remove_header` · `list_overrides` · `remove_override` ·
-`clean_overrides` · `add_filter` · `list_filters` · `remove_filter`
+`clean_overrides` · `add_filter` · `list_filters` · `remove_filter` · `activate_vpn` ·
+`deactivate_vpn` · `vpn_status` · `list_vpn_profiles`
 
 ### n8n (MCP Client Tool node)
 
@@ -216,6 +218,41 @@ A proxy sits at the network layer, so it controls **exactly** the network-level 
 Stealth is on by default (`HP_STEALTH_DEFAULT=1`) and can be toggled per session
 (`PATCH /api/sessions/{name}`).
 
+## VPN egress (optional)
+
+The image ships [wireproxy](https://github.com/pufferffish/wireproxy), a userspace
+WireGuard client that exposes a tunnel as a local SOCKS5 proxy. Drop standard
+wg-quick profile `.conf` files into `./data/vpn/` on the host (bind-mounted
+read-only at `/data/vpn`), then activate one — every upstream request the proxy
+makes leaves through the VPN until you deactivate it:
+
+```
+proxy → curl-impersonate ──► socks5h://127.0.0.1:40001 (wireproxy) ──► WireGuard ──► origins
+```
+
+Example with ProtonVPN: dashboard → *Downloads* → *WireGuard configuration* →
+save the file as `data/vpn/proton-nl.conf` → activate it. The directory is
+created on first use and is gitignored.
+
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/api/vpn/activate` | route egress through a profile: `{"profile": "proton-nl.conf"}` |
+| `POST` | `/api/vpn/deactivate` | stop the tunnel, egress goes direct |
+| `GET` | `/api/vpn/status` | active profile, pid, uptime, handshake state |
+| `GET` | `/api/vpn/profiles` | available profiles + which is active |
+
+MCP tools: `activate_vpn` · `deactivate_vpn` · `vpn_status` · `list_vpn_profiles`.
+
+Security notes:
+
+- Private keys stay in your mounted `data/vpn/` folder — profiles are passed to
+  wireproxy in place and are never copied, parsed or returned by the API.
+- Fail-closed: if the wireproxy process dies, egress is switched back to direct
+  immediately and the status endpoint reflects it.
+- VPN state is runtime-only — it deactivates on container restart.
+- Activating takes up to a few seconds (the API waits for the tunnel handshake
+  before answering, and reports `handshake_ready`).
+
 ## Configuration
 
 | Env var | Default | Description |
@@ -232,6 +269,8 @@ Stealth is on by default (`HP_STEALTH_DEFAULT=1`) and can be toggled per session
 | `HP_UPSTREAM_TIMEOUT` | `180` | upstream request timeout (seconds) |
 | `HP_UPSTREAM_VERIFY` | `system` | upstream TLS: `system`, `none`, or CA bundle path |
 | `HP_CERT_CACHE_SIZE` | `2048` | MITM leaf-certificate LRU size |
+| `HP_VPN` | `1` | enable the VPN egress feature (needs wireproxy in `PATH`) |
+| `HP_VPN_BINARY` | `wireproxy` | wireproxy executable used for VPN egress |
 | `HP_WS_RELAY` | `1` | tunnel WebSocket upgrades |
 
 ## Development
@@ -239,7 +278,7 @@ Stealth is on by default (`HP_STEALTH_DEFAULT=1`) and can be toggled per session
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e '.[dev]'
-pytest                    # 60 tests: unit + REST + MCP + end-to-end data plane
+pytest                    # 75 tests: unit + REST + MCP + end-to-end data plane
 ```
 
 The end-to-end suite spins up real origins (HTTP, HTTPS and a minimal RFC6455 WebSocket echo

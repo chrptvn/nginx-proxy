@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import shutil
 
 import uvicorn
 
@@ -15,6 +16,7 @@ from .proxy import ProxyServer
 from .relay import UpstreamClient
 from .runtime import Runtime
 from .store import Store
+from .vpn import VPNManager
 
 log = logging.getLogger("headerproxy")
 
@@ -35,13 +37,22 @@ def build_runtime(cfg: Config) -> Runtime:
         impersonate=cfg.impersonate, timeout=cfg.upstream_timeout, verify=verify
     )
     proxy = ProxyServer(cfg, engine, ca, upstream)
+    vpn: VPNManager | None = None
+    if not cfg.vpn_enabled:
+        log.info("VPN feature disabled (HP_VPN=0)")
+    elif shutil.which(cfg.vpn_binary) is None:
+        log.warning("VPN feature disabled (binary not found: %s)", cfg.vpn_binary)
+    else:
+        vpn = VPNManager(cfg, upstream)
     log.info(
         "data dir %s | active session: %s | impersonate: %s",
         cfg.data_dir,
         store.active_session_name(),
         cfg.impersonate,
     )
-    return Runtime(cfg=cfg, store=store, engine=engine, ca=ca, upstream=upstream, proxy=proxy)
+    return Runtime(
+        cfg=cfg, store=store, engine=engine, ca=ca, upstream=upstream, proxy=proxy, vpn=vpn
+    )
 
 
 def main() -> None:

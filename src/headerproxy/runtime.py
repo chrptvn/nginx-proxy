@@ -10,6 +10,7 @@ from .engine import Engine
 from .proxy import ProxyServer
 from .relay import UpstreamClient
 from .store import Store
+from .vpn import VPNManager
 
 
 @dataclass
@@ -22,3 +23,4 @@ class Runtime:
     ca: CertificateAuthority
     upstream: UpstreamClient
     proxy: ProxyServer | None = None
+    vpn: VPNManager | None = None

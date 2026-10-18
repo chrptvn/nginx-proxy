@@ -290,4 +290,44 @@ def create_mcp(rt: Runtime):
         rt.engine.reload()
         return _ok({"removed_filter": filter_id})
 
+    # -- vpn egress -------------------------------------------------------------------
+
+    _VPN_OFF = "VPN feature disabled (HP_VPN=0 or wireproxy binary not installed)"
+
+    @mcp.tool()
+    async def activate_vpn(profile: str) -> dict:
+        """Route all proxy egress through a WireGuard profile from /data/vpn."""
+        if rt.vpn is None:
+            return _err(_VPN_OFF)
+        try:
+            await rt.vpn.activate(profile)
+        except RuntimeError as exc:
+            return _err(str(exc))
+        return _ok(await rt.vpn.status())
+
+    @mcp.tool()
+    async def deactivate_vpn() -> dict:
+        """Stop the WireGuard tunnel; egress goes direct again."""
+        if rt.vpn is None:
+            return _err(_VPN_OFF)
+        try:
+            await rt.vpn.deactivate()
+        except RuntimeError as exc:
+            return _err(str(exc))
+        return _ok(await rt.vpn.status())
+
+    @mcp.tool()
+    async def vpn_status() -> dict:
+        """Current VPN tunnel state (profile, pid, uptime, handshake)."""
+        if rt.vpn is None:
+            return _err(_VPN_OFF)
+        return _ok(await rt.vpn.status())
+
+    @mcp.tool()
+    async def list_vpn_profiles() -> dict:
+        """List the WireGuard profiles available in /data/vpn."""
+        if rt.vpn is None:
+            return _ok({"profiles": [], "active": None})
+        return _ok({"profiles": rt.vpn.profiles(), "active": rt.vpn.active_profile})
+
     return mcp

@@ -73,6 +73,7 @@ class UpstreamClient:
     ) -> None:
         self._timeout = timeout
         self._verify = verify
+        self._proxy: str | None = None
         self._tls_context: ssl.SSLContext | None = None
         self._session = AsyncSession(impersonate=impersonate, allow_redirects=False)
 
@@ -80,6 +81,22 @@ class UpstreamClient:
         """Trust a custom CA bundle for upstream connections (path or bool)."""
         self._verify = verify
         self._tls_context = None
+
+    def set_proxy(self, url: str | None) -> None:
+        """Route every upstream request through ``url`` (``None`` = direct).
+
+        The VPN egress chain uses ``socks5h://127.0.0.1:<port>`` — libcurl
+        (hence curl_cffi) speaks that scheme natively with remote-side DNS,
+        verified against a local SOCKS5 server.  Raw-tunnel callers can read
+        it back via :attr:`proxy_url`.
+        """
+        self._proxy = url
+        log.info("upstream egress: %s", url or "direct")
+
+    @property
+    def proxy_url(self) -> str | None:
+        """Current egress proxy URL, or ``None`` for direct connections."""
+        return self._proxy
 
     @property
     def tls_context(self) -> ssl.SSLContext:
@@ -104,6 +121,7 @@ class UpstreamClient:
             allow_redirects=False,
             timeout=self._timeout,
             verify=self._verify,
+            proxy=self._proxy,
         )
         status = int(response.status_code)
         raw_headers: list[tuple[str, str]] = []

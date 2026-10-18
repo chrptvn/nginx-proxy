@@ -31,6 +31,7 @@ from .config import Config
 from .engine import Engine, SessionRules, apply_rules
 from .headers import Headers
 from .relay import UpstreamClient, UpstreamResponse
+from .socks import SocksError, socks5_connect
 from .stealth import apply_stealth
 
 log = logging.getLogger("headerproxy.proxy")
@@ -336,9 +337,18 @@ class ProxyServer:
 
         upstream_tls = self._upstream.tls_context if scheme == "https" else None
         try:
-            up_reader, up_writer = await asyncio.open_connection(
-                host, port, ssl=upstream_tls, server_hostname=host if upstream_tls else None
-            )
+            if self._upstream.proxy_url:
+                up_reader, up_writer = await self._open_origin_via_socks(
+                    self._upstream.proxy_url, host, port, upstream_tls
+                )
+            else:
+                up_reader, up_writer = await asyncio.open_connection(
+                    host, port, ssl=upstream_tls, server_hostname=host if upstream_tls else None
+                )
+        except SocksError as exc:
+            log.warning("[%s] websocket socks egress to %s:%s failed: %s", session, host, port, exc)
+            await self._simple_response(writer, 502, b"websocket upstream failed\n")
+            return
         except OSError as exc:
             log.warning("[%s] websocket connect to %s:%s failed: %s", session, host, port, exc)
             await self._simple_response(writer, 502, b"websocket upstream failed\n")
@@ -366,6 +376,32 @@ class ProxyServer:
             port,
             f" ({'; '.join(stealth_notes)})" if stealth_notes else "",
         )
+
+    async def _open_origin_via_socks(
+        self,
+        proxy_url: str,
+        host: str,
+        port: int,
+        tls: ssl.SSLContext | None,
+    ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+        """Connect to the origin through the configured SOCKS5 egress (VPN)."""
+        try:
+            split = urlsplit(proxy_url)
+            socks_host, socks_port = split.hostname, split.port
+        except ValueError as exc:
+            raise SocksError(f"invalid egress proxy URL {proxy_url!r}") from exc
+        if split.scheme not in ("socks5", "socks5h") or not socks_host or not socks_port:
+            raise SocksError(
+                f"unsupported egress proxy URL {proxy_url!r} (socks5/socks5h only)"
+            )
+        sock = await socks5_connect(socks_host, socks_port, host, port)
+        try:
+            return await asyncio.open_connection(
+                sock=sock, ssl=tls, server_hostname=host if tls else None
+            )
+        except BaseException:
+            sock.close()
+            raise
 
     @staticmethod
     async def _pipe(src: asyncio.StreamReader, dst: asyncio.StreamWriter, label: str) -> None:

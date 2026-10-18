@@ -6,8 +6,10 @@ from fastapi.testclient import TestClient
 from headerproxy.api import create_app
 from headerproxy.config import Config
 from headerproxy.engine import Engine
+from headerproxy.relay import UpstreamClient
 from headerproxy.runtime import Runtime
 from headerproxy.store import Store
+from headerproxy.vpn import VPNManager
 
 
 @pytest.fixture
@@ -141,3 +143,78 @@ def test_api_key_auth(tmp_path):
         good = client.get("/api/status", headers={"Authorization": "Bearer sekret"})
         assert good.status_code == 200
         assert client.get("/mcp", headers={"Authorization": "Bearer sekret"}).status_code != 401
+
+
+# -- vpn egress ------------------------------------------------------------------
+
+
+@pytest.fixture
+def vpn_runtime(tmp_path, fake_wireproxy):
+    """Runtime with a live VPNManager (fake binary) and a real upstream client."""
+    cfg = Config(
+        data_dir=tmp_path / "data",
+        log_level="WARNING",
+        vpn_binary=str(fake_wireproxy.binary),
+    )
+    store = Store(cfg.data_dir / "headerproxy.db")
+    store.ensure_default_session(True)
+    engine = Engine(store)
+    engine.reload()
+    upstream = UpstreamClient(timeout=10)
+    (cfg.data_dir / "vpn").mkdir(parents=True, exist_ok=True)
+    (cfg.data_dir / "vpn" / "api.conf").write_text("[Interface]\n")
+    rt = Runtime(
+        cfg=cfg,
+        store=store,
+        engine=engine,
+        ca=None,
+        upstream=upstream,
+        proxy=None,
+        vpn=VPNManager(cfg, upstream),
+    )
+    yield rt
+    proc = rt.vpn._proc  # sync fallback: kill the fake if a test left it up
+    if proc is not None and proc.returncode is None:
+        proc.kill()
+    store.close()
+
+
+def test_vpn_endpoints_disabled_without_manager(runtime):
+    with build_client(runtime) as client:
+        assert client.get("/api/vpn/status").status_code == 404
+        assert client.get("/api/vpn/profiles").status_code == 404
+        assert (
+            client.post("/api/vpn/activate", json={"profile": "x.conf"}).status_code
+            == 404
+        )
+        assert client.post("/api/vpn/deactivate").status_code == 404
+        assert "disabled" in client.get("/api/vpn/status").json()["detail"]
+
+
+def test_vpn_activate_deactivate_flow(vpn_runtime):
+    with build_client(vpn_runtime) as client:
+        profiles = client.get("/api/vpn/profiles").json()
+        assert profiles["profiles"] == ["api.conf"]
+        assert profiles["active"] is None
+
+        r = client.post("/api/vpn/activate", json={"profile": "api.conf"})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["active"] is True
+        assert body["profile"] == "api.conf"
+        assert body["handshake_ready"] is True
+
+        assert client.get("/api/vpn/profiles").json()["active"] == "api.conf"
+        status = client.get("/api/vpn/status").json()
+        assert status["active"] is True and status["pid"] > 0
+
+        # already active -> 409, unknown profile -> 404
+        dup = client.post("/api/vpn/activate", json={"profile": "api.conf"})
+        assert dup.status_code == 409
+        ghost = client.post("/api/vpn/activate", json={"profile": "ghost.conf"})
+        assert ghost.status_code == 404
+
+        r = client.post("/api/vpn/deactivate")
+        assert r.status_code == 200
+        assert r.json()["active"] is False
+        assert client.get("/api/vpn/profiles").json()["active"] is None
